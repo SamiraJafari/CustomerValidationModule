@@ -1,0 +1,339 @@
+@using System.Net
+@using CustomerValidationModule.Client.Models
+@using CustomerValidationModule.Client.Services
+@implements IDisposable
+@inject ICustomerValidationService ValidationService
+
+<div class="customer-lookup">
+
+    <div class="input-section">
+        <div class="input-group d-flex flex-column">
+            <div class="d-flex">
+                <label for="nationalCode">کد ملی</label>
+                <i class="mdi mdi-18px mdi-information text-secondary pe-2"
+                   title="کد ملی ۱۰ رقمی مشتری را وارد کنید" />
+            </div>
+            <div class="input-wrapper">
+                <input id="nationalCode"
+                       type="text"
+                       maxlength="10"
+                       inputmode="numeric"
+                       pattern="[0-9]*"
+                       placeholder="مثال: ۱۲۳۴۵۶۷۸۹۰"
+                       value="@_nationalCode"
+                       @oninput="OnNationalCodeInput"
+                       @onkeydown="OnKeyDown"
+                       class="@GetInputCssClass()"
+                       disabled="@(_uiState == UiState.Loading)"
+                       autocomplete="off"
+                       dir="ltr" />
+                @if (_uiState == UiState.Loading)
+                {
+                    <span class="spinner" aria-hidden="true"></span>
+                }
+            </div>
+            <span class="field-error">
+                @if (!string.IsNullOrEmpty(_validationMessage))
+                {
+                    @_validationMessage
+                }
+            </span>
+        </div>
+
+        <div class="hint-box">
+            <strong>راهنمای تست Mock:</strong>
+            <ul>
+                <li><code>000xxxxxxx</code> → یافت نشد (۴۰۴)</li>
+                <li><code>999xxxxxxx</code> → خطای سرور (۵۰۰)</li>
+                <li><code>888xxxxxxx</code> → تایم‌اوت</li>
+                <li>سایر کدهای ۱۰ رقمی → موفقیت</li>
+            </ul>
+        </div>
+    </div>
+
+    <div class="result-section @GetResultCssClass()">
+        @switch (_uiState)
+        {
+            case UiState.Idle:
+                <div class="state-idle">
+                    <div class="icon">
+                        <i class="mdi mdi-48px mdi-gamepad mdi-magnify text-secondary"></i>
+                    </div>
+                    <p>کد ملی را وارد کنید تا استعلام آغاز شود</p>
+                </div>
+                break;
+
+            case UiState.Loading:
+                <div class="state-loading">
+                    <div class="loading-animation">
+                        <div class="dot"></div>
+                        <div class="dot"></div>
+                        <div class="dot"></div>
+                    </div>
+                    <p>در حال استعلام از سرویس اعتبارسنجی...</p>
+                    <small>لطفاً صبر کنید</small>
+                </div>
+                break;
+
+            case UiState.Success when _result is not null:
+                <div class="state-success">
+                    <div class="success-header">
+                        <span class="badge success">هویت تأیید شد</span>
+                        <span class="inquiry-time">@_result.InquiryTime.ToString("HH:mm:ss")</span>
+                    </div>
+
+                    <div class="info-grid">
+                        <div class="info-item">
+                            <span class="label">نام کامل</span>
+                            <span class="value">@_result.FullName</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">نام پدر</span>
+                            <span class="value">@_result.FatherName</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">تاریخ تولد</span>
+                            <span class="value">@_result.BirthDate.ToString("yyyy/MM/dd")</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">جنسیت</span>
+                            <span class="value">@_result.Gender</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">کد ملی</span>
+                            <span class="value mono" dir="ltr">@_result.NationalCode</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="label">وضعیت اعتباری</span>
+                            <span class="value">@_result.CreditStatus</span>
+                        </div>
+                    </div>
+
+                    <div class="risk-section">
+                        <div class="risk-header">
+                            <span>نمره ریسک</span>
+                            <span class="risk-score @GetRiskCssClass(_result.RiskLevel)">@_result.RiskScore</span>
+                        </div>
+                        <div class="risk-bar">
+                            <div class="risk-fill @GetRiskCssClass(_result.RiskLevel)"
+                                 style="width: @_result.RiskScore%"></div>
+                        </div>
+                        <div class="risk-level">سطح ریسک: <strong>@TranslateRisk(_result.RiskLevel)</strong></div>
+                    </div>
+
+                    @if (_result.Alerts.Any())
+                    {
+                        <div class="alerts">
+                            <h4>هشدارها</h4>
+                            <ul>
+                                @foreach (var alert in _result.Alerts)
+                                {
+                                    <li>@alert</li>
+                                }
+                            </ul>
+                        </div>
+                    }
+                </div>
+                break;
+
+            case UiState.Error:
+                <div class="state-error">
+                    <div class="error-icon">
+                        <i class="mdi mdi-48px mdi-alert text-warning"></i>
+                    </div>
+                    <h3>@(_errorTitle ?? "خطا در استعلام")</h3>
+                    <p class="error-message">@_errorMessage</p>
+                    <button class="btn-retry" @onclick="RetryLastSearch" disabled="@string.IsNullOrEmpty(_lastSearchedCode)">
+                        تلاش مجدد
+                    </button>
+                </div>
+                break;
+        }
+    </div>
+</div>
+
+@code {
+
+    private enum UiState { Idle, Loading, Success, Error }
+
+    private UiState _uiState = UiState.Idle;
+    private string _nationalCode = string.Empty;
+    private string _validationMessage = string.Empty;
+    private CustomerValidationResult? _result;
+    private string? _errorTitle;
+    private string? _errorMessage;
+    private string _lastSearchedCode = string.Empty;
+
+
+    private CancellationTokenSource? _debounceCts;
+    private CancellationTokenSource? _requestCts;
+    private const int DebounceMilliseconds = 450;
+
+    private async Task OnNationalCodeInput(ChangeEventArgs e)
+    {
+        _nationalCode = e.Value?.ToString()?.Trim() ?? string.Empty;
+        _validationMessage = string.Empty;
+
+        if (!string.IsNullOrEmpty(_nationalCode) && !_nationalCode.All(char.IsDigit))
+        {
+            _validationMessage = "فقط رقم وارد کنید";
+            return;
+        }
+
+        _debounceCts?.Cancel();
+        _debounceCts?.Dispose();
+        _debounceCts = new CancellationTokenSource();
+
+        var token = _debounceCts.Token;
+
+        try
+        {
+            await Task.Delay(DebounceMilliseconds, token);
+
+            if (token.IsCancellationRequested) return;
+
+            await PerformSearchAsync();
+        }
+        catch (TaskCanceledException)
+        {
+            Console.WriteLine("طبیعی است – debounce جدید آمده");
+        }
+    }
+
+    private async Task OnKeyDown(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            _debounceCts?.Cancel();
+            await PerformSearchAsync();
+        }
+    }
+
+    private async Task PerformSearchAsync()
+    {
+        if (string.IsNullOrWhiteSpace(_nationalCode))
+        {
+            ResetToIdle();
+            return;
+        }
+
+        if (_nationalCode.Length != 10)
+        {
+            _validationMessage = "کد ملی باید دقیقاً ۱۰ رقم باشد";
+
+            return;
+        }
+
+        _requestCts?.Cancel();
+        _requestCts?.Dispose();
+        _requestCts = new CancellationTokenSource();
+
+        var token = _requestCts.Token;
+        _lastSearchedCode = _nationalCode;
+        _uiState = UiState.Loading;
+        _result = null;
+        _errorTitle = null;
+        _errorMessage = null;
+        StateHasChanged();
+
+        try
+        {
+            var result = await ValidationService.GetCustomerValidationAsync(_nationalCode, token);
+
+            if (token.IsCancellationRequested) return;
+
+            _result = result;
+            _uiState = UiState.Success;
+        }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine("درخواست لغو شده – هیچ کاری نکن (درخواست جدید در راه است)");
+            return;
+        }
+        catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.NotFound)
+        {
+            if (token.IsCancellationRequested) return;
+            _uiState = UiState.Error;
+            _errorTitle = "مشتری یافت نشد";
+            _errorMessage = "هیچ مشتری با این کد ملی در سامانه ثبت نشده است.";
+        }
+        catch (HttpRequestException)
+        {
+            if (token.IsCancellationRequested) return;
+            _uiState = UiState.Error;
+            _errorTitle = "خطای سرور";
+            _errorMessage = "سرویس اعتبارسنجی در حال حاضر در دسترس نیست. لطفاً بعداً تلاش کنید.";
+        }
+        catch (TimeoutException)
+        {
+            if (token.IsCancellationRequested) return;
+            _uiState = UiState.Error;
+            _errorTitle = "زمان‌بندی منقضی شد";
+            _errorMessage = "پاسخ سرویس بیش از حد طول کشید. اتصال اینترنت یا وضعیت سرویس را بررسی کنید.";
+        }
+        catch (Exception ex)
+        {
+            if (token.IsCancellationRequested) return;
+            _uiState = UiState.Error;
+            _errorTitle = "خطای غیرمنتظره";
+            _errorMessage = $"مشکلی پیش آمد: {ex.Message}";
+        }
+        finally
+        {
+            if (!token.IsCancellationRequested)
+            {
+                StateHasChanged();
+            }
+        }
+    }
+
+    private async Task RetryLastSearch()
+    {
+        if (!string.IsNullOrEmpty(_lastSearchedCode))
+        {
+            _nationalCode = _lastSearchedCode;
+            await PerformSearchAsync();
+        }
+    }
+
+    private void ResetToIdle()
+    {
+        _uiState = UiState.Idle;
+        _result = null;
+        _errorTitle = null;
+        _errorMessage = null;
+        _validationMessage = string.Empty;
+    }
+
+    private string GetInputCssClass()
+    {
+        return _uiState switch
+        {
+            UiState.Loading => "input loading",
+            UiState.Error => "input error",
+            UiState.Success => "input success",
+            _ => "input"
+        };
+    }
+
+    private string GetResultCssClass() => _uiState.ToString().ToLowerInvariant();
+
+    private static string GetRiskCssClass(string level) => level.ToLowerInvariant();
+
+    private static string TranslateRisk(string level) => level switch
+    {
+        "Low" => "پایین",
+        "Medium" => "متوسط",
+        "High" => "بالا",
+        _ => level
+    };
+
+
+    public void Dispose()
+    {
+        _debounceCts?.Cancel();
+        _debounceCts?.Dispose();
+        _requestCts?.Cancel();
+        _requestCts?.Dispose();
+    }
+}
